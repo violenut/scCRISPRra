@@ -1,0 +1,163 @@
+---
+title: "scCRISPRra: End-to-end single-cell CRISPR readout analysis"
+output: BiocStyle::html_document
+vignette: >
+  %\VignetteIndexEntry{scCRISPRra}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 6, fig.height = 4
+)
+```
+
+# Introduction
+
+`scCRISPRra` 提供单细胞 CRISPR 筛选表型分析的模块化工具：
+
+- **输入**：一个含 CRISPR Guide assay（sgRNA count）与连续表型评分（metadata 中一列）的 Seurat 对象
+- **核心算法**：Poisson-Gaussian per-guide calling → 正交多项式 shape 分解 → MAGeCK 风格 RRA 聚合
+- **输出**：gene-level 的 p_high/p_low/FDR/score，火山图与 shape 分布图
+
+本 vignette 用合成 mock 数据演示完整流程。
+
+# Setup
+
+```{r setup}
+library(scCRISPRra)
+library(ggplot2)
+set.seed(123)
+```
+
+# Mock data
+
+为了让 vignette 自包含，我们合成一个小的 sgRNA count 矩阵 + 表型评分。
+
+```{r mock-data}
+# 20 个 sgRNA，5 个 gene，每个 sgRNA 4 个；2000 个 cell
+n_guides <- 20
+n_cells  <- 2000
+n_genes  <- 5
+
+guides <- paste0("g", seq_len(n_guides))
+cells <- paste0("cell", seq_len(n_cells))
+
+# count 矩阵：每个 cell 携带 1 个 sgRNA，count 来自 Poisson(10)
+# 背景少量 ambient UMI
+count_mat <- matrix(rpois(n_guides * n_cells, lambda = 0.1),
+                    nrow = n_guides, ncol = n_cells,
+                    dimnames = list(guides, cells))
+for (i in seq_len(n_cells)) {
+  g <- sample(n_guides, 1)
+  count_mat[g, i] <- count_mat[g, i] + rpois(1, lambda = 10)
+}
+
+# 表型评分：构造双峰分布（low / high 两群）
+phenotype <- setNames(
+  c(rnorm(n_cells / 2, mean = 9,  sd = 0.5),
+    rnorm(n_cells / 2, mean = 12, sd = 0.5)),
+  cells
+)
+
+# 前两个 sgRNA（g1, g2）的携带 cell 被强行设为 high 表型
+for (g in c("g1", "g2")) {
+  pos_idx <- which(count_mat[g, ] > 3)
+  # 覆盖表型让它们在 high 端
+  phenotype[pos_idx] <- rnorm(length(pos_idx), mean = 12.2, sd = 0.3)
+}
+
+library <- data.frame(
+  sgrna_id  = guides,
+  sequence  = replicate(n_guides,
+    paste0(sample(c("A","C","G","T"), 20, replace = TRUE), collapse = "")),
+  gene_name = rep(paste0("gene", seq_len(n_genes)), each = n_guides / n_genes),
+  stringsAsFactors = FALSE
+)
+```
+
+# Step 1: sgRNA calling
+
+对每个 sgRNA 单独拟合 Poisson-Gaussian 混合模型（log-scale 双高斯近似），
+判定哪些 cell 是真正的携带者。
+
+```{r call-sgrna}
+bool_mat <- call_sgrna(count_mat,
+                       method = "poisson_gaussian",
+                       min_umi = 3L,
+                       max_guides_per_cell = 1L)
+# 简单看一下每 sgRNA 的 positive cell 数
+barplot(rowSums(bool_mat), las = 2, main = "positive cells per sgRNA")
+```
+
+# Step 2: shape decomposition
+
+用 q0.01/q0.99 截断表型 outlier，然后按 0.01 步长生成 breaks，
+对每个 sgRNA 携带 cell 的表型分布做正交多项式分解。
+
+```{r shape-decomp}
+sgrna_summary <- summarize_sgrna_shapes(
+  phenotype        = phenotype,
+  sgrna_calls      = bool_mat,
+  phenotype_quantile = c(0.01, 0.99),
+  break_step       = 0.5,    # vignette 中用大步长让示例快且 bin 数合理
+  poly_degree      = 2L
+)
+
+head(sgrna_summary)
+```
+
+可视化 shape 系数分布并标记 g1（被故意设为 high 表型的 sgRNA）：
+
+```{r shape-viz}
+plot_shape_score_distribution(sgrna_summary,
+                              score_col = "linear",
+                              target_sgrna = "g1")
+```
+
+单 sgRNA 表型分布直方图：
+
+```{r sgrna-dist}
+plot_sgrna_distribution(phenotype, bool_mat,
+                        target_sgrnas = c("g1", "g2", "g3"),
+                        binwidth = 0.4)
+```
+
+# Step 3: RRA
+
+shape 系数表与 library join，按 gene 聚合，跑 alpha_rra 得到 gene-level p 值。
+
+```{r rra}
+rra_out <- run_rra_pipeline(
+  sgrna_summary  = sgrna_summary,
+  score_cols     = c("linear", "quadratic"),
+  library_df     = library,
+  rra_alpha      = 0.1,
+  rra_variant    = "v1",
+  fdr_method     = "BH",
+  sig_threshold  = 0.01
+)
+
+head(rra_out[["linear"]])
+```
+
+火山图（high 与 low 两侧）：
+
+```{r volcano}
+plot_rra_volcano_both(rra_out[["linear"]])
+```
+
+单侧火山图：
+
+```{r volcano-single}
+plot_rra_volcano(rra_out[["linear"]], direction = "high")
+```
+
+# Session info
+
+```{r session-info}
+sessionInfo()
+```
