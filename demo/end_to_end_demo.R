@@ -3,8 +3,10 @@
 ## ============================================================================
 ##
 ## 流程与真实数据驱动脚本 04.run_scCRISPRra.R 完全一致：
-##   构建 Seurat → validate_seurat → call_sgrna → summarize_sgrna_shapes
-##   → run_rra_pipeline → 输出 CSV + 火山图
+##   构建 Seurat → validate_seurat → call_sgrna
+##   → 方案A shape 分解：summarize_sgrna_shapes → run_rra_pipeline
+##   → 方案B 直接法：  direct_sgrna_rra → run_direct_rra_pipeline
+##   → 输出 CSV + 火山图
 ## 区别：本脚本所有输入均由模拟数据生成，任何机器上可直接运行：
 ##   Rscript end_to_end_demo.R
 ##
@@ -30,8 +32,8 @@
 ## (4) sgRNA library csv：三列 id / sgRNA(20nt 序列) / Gene
 ##
 ## ──────────────── 输出（写入 <当前工作目录>/scCRISPRra_demo_output/）──────────
-## sgrna_summary.csv          sgRNA 级 shape 系数表
-##                            （sgrna/linear/quadratic/freq/mean_delta/frac_*...）
+## 方案A（shape 分解）：
+## sgrna_summary.csv          sgRNA 级 shape 系数表（sgrna/linear/quadratic/freq）
 ## rra_linear.csv             gene 级 RRA 表
 ## rra_quadratic.csv          （p_high/p_low/fdr_high/fdr_low/score/rank_*/p_two...）
 ## volcano_linear_p_high.pdf  p_high 侧火山图（KO→表型低值端富集的基因）
@@ -40,6 +42,9 @@
 ## shape_score_dist_linear.pdf  linear 系数分布（虚线标记 Gene01 的一个 sgRNA）
 ## sgrna_dist_selected.pdf    Gene01 / Gene02 各一条 sgRNA 的携带细胞表型直方图
 ## bin_offset_selected.pdf    同上 sgRNA 各 bin 的频率偏移条形图
+## 方案B（直接法 RRA）：
+## direct_sgrna_level.csv     sgRNA 级（n_cells/p_high/p_low/mean_rank...）
+## direct_gene_level.csv      gene 级（mean_rank 聚合，列结构同 rra_linear.csv）
 ##
 ## ──────────────── 方向语义（run_rra_pipeline 内 rank 按系数升序）──────────────
 ##   p_high 显著 → 该 gene 的 sgRNA 聚集在系数低端 → 敲除细胞富集于表型低值端
@@ -157,7 +162,6 @@ sgrna_summary <- summarize_sgrna_shapes(seu, bool_mat,
                                        phenotype_col = "rsv_sum",
                                        phenotype_range = NULL,
                                        break_step = 0.25,
-                                       poly_degree = 2L,
                                        guide_assay = "CRISPR_Guide")
 cat("shape 分解：", nrow(sgrna_summary), "条 sgRNA 通过 min_cells_per_sgrna=20 过滤\n")
 
@@ -188,13 +192,33 @@ print(rra_out$linear[rra_out$linear$gene %in% c("Gene01","Gene02"),
 cat("[预期] Gene01（模拟促病毒因子，KO→低载量）→ p_high 显著；\n")
 cat("[预期] Gene02（模拟限制因子，  KO→高载量）→ p_low 显著\n")
 
+## ──────────────────── Step 4b: 直接法 RRA（方案B，与方案A 对照）──────────────
+## 跳过多项式分解：sgRNA 级把"细胞当重复"直接跑 RRA（p_high = 携带细胞
+## 聚集在表型低值端），gene 级用 mean_rank（AUC 型）再聚合一层。
+## 与 shape 法同一套方向语义、同一套 volcano 可视化。
+direct_out <- run_direct_rra_pipeline(
+  direct_sgrna_rra(seu, bool_mat, phenotype_col = "rsv_sum"),
+  library_df = library_df,
+  rra_alpha = 0.1, rra_variant = "v1"
+)
+cat("\n===== 直接法 gene 级结果（mean_rank 聚合）=====\n")
+print(direct_out$gene_level[direct_out$gene_level$gene %in% c("Gene01","Gene02"),
+                            c("gene","sgRNA_count","p_high","p_low",
+                              "fdr_high","fdr_low","score")])
+cat("[预期] 与 shape 法方向一致：Gene01 → p_high 显著；Gene02 → p_low 显著\n")
+
 ## ──────────────────── Step 5: 输出表格 ────────────────────
 write.csv(sgrna_summary, file.path(out_dir, "sgrna_summary.csv"), row.names = FALSE)
 for (col in names(rra_out)) {
   write.csv(rra_out[[col]], file.path(out_dir, paste0("rra_", col, ".csv")),
             row.names = FALSE)
 }
-cat("\n已写出: sgrna_summary.csv, rra_linear.csv, rra_quadratic.csv\n")
+write.csv(direct_out$sgrna_level,
+          file.path(out_dir, "direct_sgrna_level.csv"), row.names = FALSE)
+write.csv(direct_out$gene_level,
+          file.path(out_dir, "direct_gene_level.csv"), row.names = FALSE)
+cat("\n已写出: sgrna_summary.csv, rra_linear.csv, rra_quadratic.csv,",
+    "direct_sgrna_level.csv, direct_gene_level.csv\n")
 
 ## ──────────────────── Step 6: 可视化 ────────────────────
 ## 单图失败不影响其余（与 04.run_scCRISPRra.R 一致的写法）

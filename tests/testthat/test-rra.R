@@ -141,3 +141,74 @@ test_that("run_rra_pipeline: 无 library 交集时报错", {
                                 library_df = lib),
                "没有交集")
 })
+
+## ──────── 直接法（direct_sgrna_rra / run_direct_rra_pipeline）────────
+
+test_that("direct_sgrna_rra: 效应 sgRNA 携带细胞表型偏低 → p_high 显著", {
+  set.seed(123)
+  pheno <- setNames(rnorm(500, mean = 10, sd = 1), paste0("cell", 1:500))
+  calls <- mock_calls(n_cells = 500, n_guides = 10)
+  # g1 的携带细胞表型整体下移（模拟促病毒因子：KO → 低载量）
+  g1_cells <- colnames(calls)[calls["g1", ]]
+  pheno[g1_cells] <- pheno[g1_cells] - 3
+
+  out <- direct_sgrna_rra(pheno, calls, min_cells_per_sgrna = 1)
+  expect_s3_class(out, "data.frame")
+  expect_true(all(c("sgrna", "n_cells", "cells_low", "cells_high",
+                    "p_high", "p_low", "fdr_high", "fdr_low",
+                    "mean_rank") %in% colnames(out)))
+  expect_equal(sort(out$sgrna), sort(rownames(calls)))
+
+  g1 <- out[out$sgrna == "g1", ]
+  expect_lt(g1$p_high, 0.05)
+  expect_gt(g1$p_low, 0.5)
+  # mean_rank 应显著低于 0.5（携带细胞聚集低表型端）
+  expect_lt(g1$mean_rank, 0.4)
+})
+
+test_that("direct_sgrna_rra: phenotype_range 与 quantile 截断一致可用", {
+  set.seed(123)
+  pheno <- setNames(rnorm(500, mean = 10, sd = 1), paste0("cell", 1:500))
+  calls <- mock_calls(n_cells = 500, n_guides = 10)
+
+  out_r <- direct_sgrna_rra(pheno, calls, phenotype_range = c(9, 11),
+                            min_cells_per_sgrna = 1)
+  expect_true(nrow(out_r) > 0)
+  # 窗口内细胞数与表型落在区间内的数量一致（忽略无 positive call 的细胞）
+  n_in <- sum(pheno >= 9 & pheno <= 11)
+  expect_true(all(out_r$n_cells <= n_in))
+
+  expect_error(direct_sgrna_rra(pheno, calls, phenotype_range = c(99, 100),
+                                min_cells_per_sgrna = 1),
+               "无法计算")
+})
+
+test_that("run_direct_rra_pipeline: 输出 list 两元素且 gene_level 可喂火山图", {
+  set.seed(123)
+  pheno <- setNames(rnorm(500, mean = 10, sd = 1), paste0("cell", 1:500))
+  n_guides <- 10
+  calls <- matrix(FALSE, nrow = n_guides, ncol = 500,
+                  dimnames = list(paste0("g", 1:n_guides),
+                                  paste0("cell", 1:500)))
+  gene_map <- rep(paste0("gene", 1:5), each = 2)   # 每基因 2 条 sgRNA
+  for (i in seq_len(500)) calls[sample(n_guides, 1), i] <- TRUE
+  # gene1 的 sgRNA 携带细胞表型偏低
+  g1_cells <- colnames(calls)[calls["g1", ] | calls["g2", ]]
+  pheno[g1_cells] <- pheno[g1_cells] - 3
+
+  sgl <- direct_sgrna_rra(pheno, calls, min_cells_per_sgrna = 1)
+  lib <- data.frame(sgrna_id = paste0("g", 1:n_guides),
+                    sequence = "A",
+                    gene_name = gene_map, stringsAsFactors = FALSE)
+
+  # 每基因仅 2 条 sgRNA，rra_alpha 放宽到 0.25 保证检验功效
+  dir_out <- run_direct_rra_pipeline(sgl, library_df = lib, rra_alpha = 0.25)
+  expect_type(dir_out, "list")
+  expect_equal(names(dir_out), c("sgrna_level", "gene_level"))
+  gl <- dir_out$gene_level
+  expect_true(all(c("p_high", "p_low", "fdr_high", "fdr_low", "score",
+                    "rank_high", "rank_low", "p_two", "alpha_high",
+                    "genename_high") %in% colnames(gl)))
+  # gene1（促病毒模拟）应 p_high 侧显著
+  expect_lt(gl$p_high[gl$gene == "gene1"], 0.1)
+})

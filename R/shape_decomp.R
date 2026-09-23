@@ -73,19 +73,18 @@ compute_global_hist <- function(phenotype, breaks) {
 }
 
 
-#' 对单个 sgRNA 的表型分布做正交多项式分解
+#' 对单个 sgRNA 的表型分布做正交多项式分解（固定 2 阶）
 #'
 #' 把该 sgRNA 携带的 cell 的表型分布与全局分布相减得到偏移，
-#' 再用 \code{stats::poly()} 的正交多项式基投影得到系数。
+#' 再用 \code{stats::poly()} 的 2 阶正交多项式基投影得到系数：
+#' \code{linear}（整体偏移方向）与 \code{quadratic}（分布形状/宽度偏移）。
 #'
 #' @param per_sgrna_phenotype 命名数值向量，该 sgRNA 携带 cell 的表型
 #' @param global_hist data.frame（来自 \code{\link{compute_global_hist}}）
-#' @param degree 多项式阶数，默认 2
 #' @param weights 每个 cell 的权重（如 UMI 占比软去卷积权重），长度需与
 #'   \code{per_sgrna_phenotype} 一致。默认 \code{NULL} 即等权（每 cell 计 1）
 #'
-#' @return 命名数值向量，长度 = degree，名称为
-#'   \code{linear, quadratic, cubic, deg4, ...}
+#' @return 命名数值向量 \code{c(linear, quadratic)}
 #' @export
 #'
 #' @examples
@@ -93,23 +92,20 @@ compute_global_hist <- function(phenotype, breaks) {
 #' brks <- compute_breaks(pheno)
 #' global_hist <- compute_global_hist(pheno, brks)
 #' sub_pheno <- pheno[1:30]
-#' shape <- decompose_shape(sub_pheno, global_hist, degree = 2)
-decompose_shape <- function(per_sgrna_phenotype, global_hist, degree = 2L,
-                            weights = NULL) {
+#' shape <- decompose_shape(sub_pheno, global_hist)
+decompose_shape <- function(per_sgrna_phenotype, global_hist, weights = NULL) {
   stopifnot("'per_sgrna_phenotype' 必须是数值向量" =
               is.numeric(per_sgrna_phenotype))
   stopifnot("'global_hist' 必须是 compute_global_hist 输出的 data.frame" =
               is.data.frame(global_hist) &&
               all(c("start", "end", "freq") %in% colnames(global_hist)))
-  stopifnot("'degree' 必须是 >=1 的整数" =
-              is.numeric(degree) && length(degree) == 1 &&
-              degree >= 1 && degree == round(degree))
   if (!is.null(weights)) {
     stopifnot("'weights' 必须是数值向量且长度与 per_sgrna_phenotype 一致" =
                 is.numeric(weights) &&
                 length(weights) == length(per_sgrna_phenotype))
   }
 
+  degree <- 2L
   # 去掉 NA（避免 cut/split 传播 NA level）
   valid_idx <- !is.na(per_sgrna_phenotype)
   per_sgrna_phenotype <- per_sgrna_phenotype[valid_idx]
@@ -142,53 +138,16 @@ decompose_shape <- function(per_sgrna_phenotype, global_hist, degree = 2L,
       shape <- as.numeric(crossprod(freq_offset, poly_basis))
     }
   }
-  names(shape) <- .shape_term_names(degree)
+  names(shape) <- c("linear", "quadratic")
   shape
 }
 
 
-#' 为 shape 系数生成命名（内部）
-#' @param degree 阶数
-#' @return 字符向量
-#' @keywords internal
-.shape_term_names <- function(degree) {
-  std <- c("linear", "quadratic", "cubic")
-  if (degree <= 3) {
-    std[seq_len(degree)]
-  } else {
-    c(std, paste0("deg", 4:degree))
-  }
-}
-
-
-#' 一维 Wasserstein-1 距离（内部函数）
+#' 对所有 sgRNA 计算 shape 分解系数（linear + quadratic）
 #'
-#' 对两个一维样本计算经验 Wasserstein-1 距离：
-#' \code{W_1 = \int |F_x(t) - F_y(t)| dt}。
-#' 实现方式：在等距分位点上求逆 ECDF 差的均值。
-#'
-#' @param x 样本1（如某 sgRNA 的 cell 表型向量）
-#' @param y 样本2（如全局表型向量）
-#' @return W_1 距离（非负标量），空输入返回 NA_real_
-#' @keywords internal
-.wasserstein_1d <- function(x, y) {
-  nx <- length(x)
-  ny <- length(y)
-  if (nx == 0 || ny == 0) return(NA_real_)
-  n <- max(nx, ny)
-  qx <- stats::quantile(x, probs = seq(0, 1, length.out = n),
-                        names = FALSE, type = 1)
-  qy <- stats::quantile(y, probs = seq(0, 1, length.out = n),
-                        names = FALSE, type = 1)
-  mean(abs(qx - qy))
-}
-
-
-#' 对所有 sgRNA 计算 shape 分解系数
-#'
-#' 这是 stage 2 的主函数：先用 \code{phenotype_quantile} 截断表型 outlier，
-#' 在截断后的数据上算 breaks 与全局 hist，然后对每个 sgRNA 在其携带
-#' cell 上做正交多项式分解，输出 sgRNA-level shape 系数表。
+#' shape 方案的主函数：先用 \code{phenotype_quantile} 或 \code{phenotype_range}
+#' 截断表型区间，在截断后的数据上算 breaks 与全局 hist，然后对每个 sgRNA 在其
+#' 携带 cell 上做 2 阶正交多项式分解，输出 sgRNA-level 系数表。
 #'
 #' 注意：本函数不依赖 sgRNA library，只用 sgRNA id 做分组。
 #' library join 推迟到 \code{\link{run_rra_pipeline}}。
@@ -206,7 +165,6 @@ decompose_shape <- function(per_sgrna_phenotype, global_hist, degree = 2L,
 #'   cell，且 breaks 直接定义为 \code{seq(low, high, by = break_step)}。
 #'   适用于有先验有效区间（如病毒载量 log2 scale 的 \code{c(9, 13)}）的场景
 #' @param break_step 步长，默认 \code{0.01}
-#' @param poly_degree 多项式阶数，默认 2
 #' @param min_cells_per_sgrna 每 sgRNA 至少携带多少 cell 才保留在输出中。
 #'   默认 20（与 bin 数解耦，bin 稀疏度不影响 rank，详见 vignette）
 #' @param guide_assay CRISPR Guide assay 名，默认 \code{"CRISPR Guide"}。
@@ -216,11 +174,8 @@ decompose_shape <- function(per_sgrna_phenotype, global_hist, degree = 2L,
 #'   sgRNA UMI 总和} 软分配，单一 sgRNA cell 权重为 1
 #'
 #' @return data.frame，每行一个 sgRNA，列：
-#'   \code{sgrna}（sgRNA id）、\code{linear, quadratic, ...}（shape 系数）、
-#'   \code{freq}（携带 cell 数）、\code{mean_delta}（均值偏移）、
-#'   \code{frac_low}（< global q10 比例）、\code{frac_high}（> global q90 比例）、
-#'   \code{q10_dev, q25_dev, q50_dev, q75_dev, q90_dev}（分位数偏移）、
-#'   \code{wasserstein_dist}（与全局分布的 Wasserstein-1 距离）
+#'   \code{sgrna}（sgRNA id）、\code{linear}、\code{quadratic}（shape 系数）、
+#'   \code{freq}（携带 cell 数）
 #' @export
 #'
 #' @examples
@@ -234,7 +189,6 @@ summarize_sgrna_shapes <- function(seu,
                                     phenotype_quantile = c(0.01, 0.99),
                                     phenotype_range = NULL,
                                     break_step = 0.01,
-                                    poly_degree = 2L,
                                     min_cells_per_sgrna = 20L,
                                     guide_assay = "CRISPR Guide",
                                     weight_by_umi = TRUE) {
@@ -251,9 +205,6 @@ summarize_sgrna_shapes <- function(seu,
               is.numeric(phenotype) && !is.null(names(phenotype)))
   stopifnot("'sgrna_calls' 必须是 logical matrix" =
               is.logical(sgrna_calls) && is.matrix(sgrna_calls))
-  stopifnot("'poly_degree' 必须是 >=1 的整数" =
-              is.numeric(poly_degree) && length(poly_degree) == 1 &&
-              poly_degree >= 1 && poly_degree == round(poly_degree))
   stopifnot("'min_cells_per_sgrna' 必须是非负整数" =
               is.numeric(min_cells_per_sgrna) && length(min_cells_per_sgrna) == 1 &&
               min_cells_per_sgrna >= 0 &&
@@ -287,21 +238,7 @@ summarize_sgrna_shapes <- function(seu,
   ]
   global_hist <- compute_global_hist(phenotype_filt, breaks)
 
-  # 3. min_cells_per_sgrna 已在参数中固定（默认 20），无需再算
-
-  # 全局 summary statistics（用于额外 shape 指标）
-  global_mean <- mean(phenotype_filt)
-  global_q <- stats::quantile(phenotype_filt,
-                              probs = c(0.1, 0.25, 0.5, 0.75, 0.9),
-                              names = FALSE)
-  names(global_q) <- c("q10", "q25", "q50", "q75", "q90")
-
-  extra_cols <- c("mean_delta", "frac_low", "frac_high",
-                  "q10_dev", "q25_dev", "q50_dev", "q75_dev", "q90_dev",
-                  "wasserstein_dist")
-  n_extra <- length(extra_cols)
-
-  # 3.5 UMI 占比权重（软去卷积：多 sgRNA 细胞按 UMI 占比软分配）
+  # 3. UMI 占比权重（软去卷积：多 sgRNA 细胞按 UMI 占比软分配）
   if (weight_by_umi && inherits(seu, "Seurat")) {
     guide_count <- .get_guide_matrix(seu, guide_assay)      # sgRNA × cell
     common_cells <- intersect(colnames(guide_count), colnames(sgrna_calls))
@@ -323,43 +260,27 @@ summarize_sgrna_shapes <- function(seu,
     stop("'sgrna_calls' 必须有 rownames（sgRNA id）")
   }
 
-  term_names <- .shape_term_names(poly_degree)
-
   result_list <- lapply(guide_ids, function(gid) {
     pos_cells <- colnames(sgrna_calls)[sgrna_calls[gid, ]]
     pos_cells <- intersect(pos_cells, names(phenotype_filt))
     if (length(pos_cells) < 1) {
-      out <- setNames(as.list(c(rep(NA_real_, poly_degree), 0,
-                                rep(NA_real_, n_extra))),
-                      c(term_names, "freq", extra_cols))
-      out$sgrna <- gid
-      return(as.data.frame(out, stringsAsFactors = FALSE))
+      return(data.frame(sgrna = gid, linear = NA_real_,
+                        quadratic = NA_real_, freq = 0L,
+                        stringsAsFactors = FALSE))
     }
     pheno_sub <- phenotype_filt[pos_cells]
     w <- if (is.null(cell_total)) NULL else
          as.numeric(guide_count[gid, pos_cells] / cell_total[pos_cells])
-    shape <- decompose_shape(pheno_sub, global_hist, degree = poly_degree,
-                             weights = w)
-
-    # 额外 shape 指标（等权，每个 positive call 计 1）
-    out <- as.list(shape)
-    out$freq <- length(pos_cells)
-    out$mean_delta <- mean(pheno_sub) - global_mean
-    out$frac_low <- mean(pheno_sub < global_q["q10"])
-    out$frac_high <- mean(pheno_sub > global_q["q90"])
-    out$q10_dev <- stats::quantile(pheno_sub, 0.1, names = FALSE) - global_q["q10"]
-    out$q25_dev <- stats::quantile(pheno_sub, 0.25, names = FALSE) - global_q["q25"]
-    out$q50_dev <- stats::quantile(pheno_sub, 0.5, names = FALSE) - global_q["q50"]
-    out$q75_dev <- stats::quantile(pheno_sub, 0.75, names = FALSE) - global_q["q75"]
-    out$q90_dev <- stats::quantile(pheno_sub, 0.9, names = FALSE) - global_q["q90"]
-    out$wasserstein_dist <- .wasserstein_1d(pheno_sub, phenotype_filt)
-    out$sgrna <- gid
-    as.data.frame(out, stringsAsFactors = FALSE)
+    shape <- decompose_shape(pheno_sub, global_hist, weights = w)
+    data.frame(sgrna = gid,
+               linear = unname(shape["linear"]),
+               quadratic = unname(shape["quadratic"]),
+               freq = length(pos_cells),
+               stringsAsFactors = FALSE)
   })
 
   result <- do.call(rbind, result_list)
-  # 调列顺序：sgrna 在前
-  result <- result[, c("sgrna", term_names, "freq", extra_cols)]
+  result <- result[, c("sgrna", "linear", "quadratic", "freq")]
 
   # 5. min_cells_per_sgrna 过滤
   result <- result[result$freq >= min_cells_per_sgrna, ]

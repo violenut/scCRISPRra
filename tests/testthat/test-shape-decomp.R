@@ -44,7 +44,7 @@ test_that("decompose_shape: 右偏 sgRNA linear 系数 > 0", {
 
   # 构造右偏 sgRNA 的 cell 表型（shift +2）
   sub_pheno <- setNames(pheno[1:50] + 2, names(pheno)[1:50])
-  shape <- decompose_shape(sub_pheno, gh, degree = 2)
+  shape <- decompose_shape(sub_pheno, gh)
   expect_length(shape, 2)
   expect_named(shape, c("linear", "quadratic"))
   expect_gt(shape["linear"], 0)
@@ -58,7 +58,7 @@ test_that("decompose_shape: 左偏 sgRNA linear 系数 < 0", {
   gh <- compute_global_hist(pheno, brks)
 
   sub_pheno <- setNames(pheno[1:50] - 2, names(pheno)[1:50])
-  shape <- decompose_shape(sub_pheno, gh, degree = 2)
+  shape <- decompose_shape(sub_pheno, gh)
   expect_lt(shape["linear"], 0)
 })
 
@@ -71,7 +71,7 @@ test_that("decompose_shape: 空 sgRNA 不崩（freq=0 处理）", {
 
   # 全部 cell 表型都落在 breaks 之外（极端值）
   sub_pheno <- setNames(c(-100, -99), c("a", "b"))
-  shape <- decompose_shape(sub_pheno, gh, degree = 2)
+  shape <- decompose_shape(sub_pheno, gh)
   expect_length(shape, 2)
   # 全 0 的 shape
   expect_equal(as.numeric(shape), c(0, 0))
@@ -83,24 +83,27 @@ test_that("summarize_sgrna_shapes: 默认 min_cells_per_sgrna=20", {
                     paste0("cell", 1:500))
   calls <- mock_calls(n_cells = 500, n_guides = 20)
 
-  sgrna_summary <- summarize_sgrna_shapes(pheno, calls,
-                                          break_step = 0.5,
-                                          poly_degree = 2)
+  sgrna_summary <- summarize_sgrna_shapes(pheno, calls, break_step = 0.5)
   expect_s3_class(sgrna_summary, "data.frame")
   expect_true(all(c("sgrna", "linear", "quadratic", "freq") %in%
                   colnames(sgrna_summary)))
+  expect_equal(setdiff(colnames(sgrna_summary),
+                       c("sgrna", "linear", "quadratic", "freq")),
+               character(0))   # 已删除 mean_delta/frac_*/q*_dev/wasserstein 等
   # 默认 min_cells_per_sgrna = 20，所有保留的 sgRNA 至少有 20 cell
   expect_true(all(sgrna_summary$freq >= 20))
 })
 
-test_that("summarize_sgrna_shapes: poly_degree=3 输出 cubic 列", {
+test_that("summarize_sgrna_shapes: phenotype_range 固定区间生效", {
   set.seed(123)
   pheno <- setNames(rnorm(500, mean = 10, sd = 1),
                     paste0("cell", 1:500))
   calls <- mock_calls(n_cells = 500, n_guides = 20)
 
   sgrna_summary <- summarize_sgrna_shapes(pheno, calls,
-                                          poly_degree = 3,
+                                          phenotype_range = c(9, 11),
                                           break_step = 0.5)
-  expect_true("cubic" %in% colnames(sgrna_summary))
+  used_range <- attr(sgrna_summary, "phenotype_range")
+  expect_equal(used_range[1], 9)
+  expect_true(used_range[2] >= 11)   # breaks 覆盖 hi
 })

@@ -20,8 +20,13 @@ knitr::opts_chunk$set(
 `scCRISPRra` 提供单细胞 CRISPR 筛选表型分析的模块化工具：
 
 - **输入**：一个含 CRISPR Guide assay（sgRNA count）与连续表型评分（metadata 中一列）的 Seurat 对象
-- **核心算法**：Poisson-Gaussian per-guide calling → 正交多项式 shape 分解 → MAGeCK 风格 RRA 聚合
+- **核心算法**：Poisson-Gaussian per-guide calling → 两种并列的 gene 级评价方案
+  - **方案 A（shape 分解）**：正交多项式 shape 系数（linear/quadratic）→ MAGeCK 风格 RRA 聚合
+  - **方案 B（直接法）**：sgRNA 级把"细胞当重复"直接跑 RRA → mean_rank 再聚合
 - **输出**：gene-level 的 p_high/p_low/FDR/score，火山图与 shape 分布图
+
+两方案 rank 均按表型升序，方向语义完全一致：p_high 显著 = 敲除细胞富集表型低值端
+（表型为病毒载量时 = 候选促病毒宿主因子）；p_low 显著 = 候选限制因子。
 
 本 vignette 用合成 mock 数据演示完整流程。
 
@@ -93,18 +98,18 @@ bool_mat <- call_sgrna(count_mat,
 barplot(rowSums(bool_mat), las = 2, main = "positive cells per sgRNA")
 ```
 
-# Step 2: shape decomposition
+# Step 2: shape decomposition（方案 A）
 
-用 q0.01/q0.99 截断表型 outlier，然后按 0.01 步长生成 breaks，
-对每个 sgRNA 携带 cell 的表型分布做正交多项式分解。
+用 q0.01/q0.99 截断表型 outlier，然后按步长生成 breaks，
+对每个 sgRNA 携带 cell 的表型分布做 2 阶正交多项式分解
+（linear = 整体偏移方向，quadratic = 分布形状偏移）。
 
 ```{r shape-decomp}
 sgrna_summary <- summarize_sgrna_shapes(
   phenotype        = phenotype,
   sgrna_calls      = bool_mat,
   phenotype_quantile = c(0.01, 0.99),
-  break_step       = 0.5,    # vignette 中用大步长让示例快且 bin 数合理
-  poly_degree      = 2L
+  break_step       = 0.5    # vignette 中用大步长让示例快且 bin 数合理
 )
 
 head(sgrna_summary)
@@ -154,6 +159,29 @@ plot_rra_volcano_both(rra_out[["linear"]])
 
 ```{r volcano-single}
 plot_rra_volcano(rra_out[["linear"]], direction = "high")
+```
+
+# Step 4: direct RRA（方案 B）
+
+跳过多项式分解：sgRNA 级把"细胞当重复"直接跑 RRA（`p_high` = 携带细胞聚集在
+表型低值端），gene 级用 `mean_rank`（携带细胞平均 normalized rank，AUC 型）
+再聚合一层。输出列结构与 shape 方案一致，可复用同一套火山图。
+
+```{r direct-rra}
+sgl <- direct_sgrna_rra(phenotype, bool_mat, min_cells_per_sgrna = 4)
+head(sgl)
+
+dir_out <- run_direct_rra_pipeline(sgl, library_df = library_df)
+head(dir_out$gene_level)
+```
+
+g1 被故意设为 high 表型 sgRNA，因此其携带细胞聚集在高表型端 ——
+在直接法中应表现为 p_low 偏小（与 shape 法方向语义一致；
+vignette 的 mock 数据量小，显著性以 demo 脚本的大样本为准）：
+
+```{r direct-check}
+dir_out$gene_level[dir_out$gene_level$gene == "gene1",
+                   c("gene", "p_high", "p_low", "fdr_low")]
 ```
 
 # Session info

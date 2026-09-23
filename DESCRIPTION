@@ -1,16 +1,18 @@
 Package: scCRISPRra
 Type: Package
 Title: Single-Cell CRISPR Screening Readout Analysis
-Version: 0.1.0
-Date: 2026-09-04
+Version: 0.2.0
+Date: 2026-09-23
 Authors@R: c(
     person(given = "violenut", family = "zhang",
            email = "violenut@example.com", role = c("aut", "cre")))
 Description: 模块化的单细胞 CRISPR 筛选表型分析工具包。
     输入为含 CRISPR Guide assay 与连续表型评分的 Seurat 对象，
-    提供 Poisson-Gaussian per-guide calling、正交多项式 shape 分解、
-    MAGeCK 风格 RRA 聚合等核心算法，并附带火山图/shape 分布/单 sgRNA
-    直方图等可视化函数。算法本身 virus-agnostic，表型可任意连续评分。
+    提供 Poisson-Gaussian per-guide calling 与两种并列的 gene 级评价方案：
+    shape 分解法（2 阶正交多项式系数 + MAGeCK 风格 RRA 聚合）与
+    直接法 RRA（sgRNA 级细胞当重复的 RRA 聚集检验 + mean_rank 聚合），
+    并附带火山图/shape 分布/单 sgRNA 直方图等可视化函数。
+    算法本身 virus-agnostic，表型可任意连续评分。
 License: MIT + file LICENSE
 Encoding: UTF-8
 RoxygenNote: 7.3.3
